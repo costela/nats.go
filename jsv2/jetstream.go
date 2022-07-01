@@ -1,3 +1,16 @@
+// Copyright 2020-2022 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package jetstream
 
 import (
@@ -11,26 +24,37 @@ import (
 )
 
 type (
-	/*
-		JetStream contains CRUD methods to operate on a stream
-		Create, update and get operations return 'Stream' interface,
-		allowing operations on consumers
 
-		GetConsumer and DeleteConsumer are helper methods used to fetch/remove consumer without fetching stream (bypassing stream API)
-	// */
-
+	// JetStream contains CRUD methods to operate on a stream
+	// Create, update and get operations return 'Stream' interface,
+	// allowing operations on consumers
+	//
+	// AddConsumer, Consumer and DeleteConsumer are helper methods used to create/fetch/remove consumer without fetching stream (bypassing stream API)
+	//
+	// Client returns a JetStremClient, used to publish messages on a stream or fetch messages by sequence number
 	JetStream interface {
+		// Returns *nats.AccountInfo, containing details about the account associated with this JetStream connection
 		AccountInfo(ctx context.Context) (*nats.AccountInfo, error)
 
+		// AddStream creates a new stream with given config and returns a hook to operate on it
 		AddStream(context.Context, nats.StreamConfig) (Stream, error)
+		// UpdateStream updates an existing stream
 		UpdateStream(context.Context, nats.StreamConfig) (Stream, error)
+		// Stream returns a `Stream` hook for a given stream name
 		Stream(context.Context, string) (Stream, error)
+		// DeleteStream removes a stream with given name
 		DeleteStream(context.Context, string) error
 
+		// AddConsumer creates a consumer on a given stream with given config
+		// This operation is idempotent - if a consumer already exists, it will be a no-op (or error if configs do not match)
+		// Consumer interface is returned, serving as a hook to operate on a consumer (e.g. fetch messages)
 		AddConsumer(context.Context, string, nats.ConsumerConfig) (Consumer, error)
+		// Consumer returns a hook to an existing consumer, allowing processing of messages
 		Consumer(context.Context, string, string) (Consumer, error)
+		// DeleteConsumer removes a consumer with given name from a stream
 		DeleteConsumer(context.Context, string, string) error
 
+		// Client returns a JetStreamClient interface, allowing publishing/fetching JetStream messages
 		Client(context.Context, ...clientOpt) (JetStreamClient, error)
 	}
 
