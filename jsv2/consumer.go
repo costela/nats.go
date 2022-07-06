@@ -111,14 +111,15 @@ func (p *pullConsumer) Next(ctx context.Context, opts ...nextOpt) (JetStreamMsg,
 			return nil, err
 		}
 	}
-	// msgs, err := p.fetch(ctx, *req, nil)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// if len(msgs) == 0 {
-	// 	return nil, ErrNoMessages
-	// }
-	return nil, nil
+	msgChan := make(chan *jetStreamMsg, 1)
+	err := p.fetch(ctx, *req, msgChan)
+	if err != nil {
+		if errors.Is(err, ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
+			return nil, ErrNoMessages
+		}
+		return nil, err
+	}
+	return <-msgChan, nil
 }
 
 // Stream continously receives messages from a consumer and handles them with the provided callback function
@@ -133,7 +134,7 @@ func (p *pullConsumer) Stream(ctx context.Context, handler MessageHandler, opts 
 	}
 	defaultTimeout := 1 * time.Second
 	req := &pullRequest{
-		Batch:   1000,
+		Batch:   100,
 		Expires: defaultTimeout - 10*time.Millisecond,
 	}
 	for _, opt := range opts {
@@ -214,11 +215,10 @@ func (c *pullConsumer) fetch(ctx context.Context, req pullRequest, target chan<-
 			}
 			return err
 		}
-		if err := checkMsg(msg, req.NoWait); err != nil {
+		if err := checkMsg(msg); err != nil {
 			if errors.Is(err, ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
-				continue
+				return nil
 			}
-			return err
 		}
 		target <- c.jetStream.toJSMsg(msg)
 		count++
@@ -263,7 +263,7 @@ const (
 // Returns if the given message is a user message or not, and if
 // `checkSts` is true, returns appropriate error based on the
 // content of the status (404, etc..)
-func checkMsg(msg *nats.Msg, isNoWait bool) error {
+func checkMsg(msg *nats.Msg) error {
 	// If payload or no header, consider this a user message
 	if len(msg.Data) > 0 || len(msg.Header) == 0 {
 		return nil
