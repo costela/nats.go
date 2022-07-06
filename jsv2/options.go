@@ -16,36 +16,14 @@ package jetstream
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
+// ErrInvalidOption is returned when there is a collision between options
 var ErrInvalidOption = errors.New("jetstream: invalid option")
 
-// WithApiPrefix sets the API prefix to be used in requests for a JetStream context
-// If not provided, a default prefix will be used ($JS.API.)
-func WithApiPrefix(prefix string) jetStreamOpt {
-	return func(opts *jsOpts) error {
-		opts.apiPrefix = prefix
-		if !strings.HasSuffix(opts.apiPrefix, ".") {
-			opts.apiPrefix = fmt.Sprintf("%s.", opts.apiPrefix)
-		}
-		return nil
-	}
-}
-
-// WithDomain sets the domain name used when sending JetStream requests
-// It cannot be used in conjunction with `WithApiPrefix()` option
-func WithDomain(domain string) jetStreamOpt {
-	return func(opts *jsOpts) error {
-		if opts.apiPrefix != "" {
-			return fmt.Errorf("%w: both 'api_prefix' and 'domain' cannot be provided for JetStream configuration", ErrInvalidOption)
-		}
-		opts.apiPrefix = fmt.Sprintf(jsDomainT, domain)
-		return nil
-	}
-}
-
+// WithClientTrace enables request/responce API calls tracing
+// ClientTrace is used to provide handlers for each event
 func WithClientTrace(ct *ClientTrace) jetStreamOpt {
 	return func(opts *jsOpts) error {
 		opts.clientTrace = ct
@@ -95,7 +73,7 @@ func WithNoWait(noWait bool) nextOpt {
 
 // WithBatchSize limits the number of messages to be fetched from the stream in one request
 // If not provided, a default of 100 messages will be used
-func WithBatchSize(batch int) streamOpt {
+func WithBatchSize(batch int) pullStreamOpt {
 	return func(cfg *pullRequest) error {
 		cfg.Batch = batch
 		return nil
@@ -103,7 +81,7 @@ func WithBatchSize(batch int) streamOpt {
 }
 
 // WithExpiry sets timeount on a single batch request, waiting until at least one message is available
-func WithExpiry(expires time.Duration) streamOpt {
+func WithExpiry(expires time.Duration) pullStreamOpt {
 	return func(cfg *pullRequest) error {
 		cfg.Expires = expires
 		return nil
@@ -199,7 +177,7 @@ func WithPublishAsyncErrHandler(cb MsgErrHandler) clientOpt {
 	}
 }
 
-func WithIdleHeartbeat(hb time.Duration) streamOpt {
+func WithIdleHeartbeat(hb time.Duration) pullStreamOpt {
 	return func(req *pullRequest) error {
 		if hb <= 0 {
 			return fmt.Errorf("idle_heartbeat value must be greater than 0")

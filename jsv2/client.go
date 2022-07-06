@@ -101,6 +101,10 @@ type (
 
 const (
 	statusHdr = "Status"
+
+	inboxPrefix = "_INBOX."
+	rdigits     = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	base        = 62
 )
 
 func (c *jetStreamClient) Publish(ctx context.Context, subj string, data []byte, opts ...publishOpt) (*nats.PubAck, error) {

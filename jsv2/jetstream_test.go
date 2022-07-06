@@ -17,7 +17,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,7 +36,7 @@ func TestAddStream(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	js, err := GetJetStream(ctx, nc)
+	js, err := New(nc)
 	defer nc.Close()
 
 	_, err = js.Stream(ctx, "foo")
@@ -105,7 +107,7 @@ func TestNext(t *testing.T) {
 	defer nc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	js, err := GetJetStream(ctx, nc)
+	js, err := New(nc)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -153,7 +155,7 @@ func TestStream(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	js, err := GetJetStream(ctx, nc)
+	js, err := New(nc)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -229,7 +231,7 @@ func TestStream_Timeout(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	js, err := GetJetStream(ctx, nc)
+	js, err := New(nc)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -304,7 +306,7 @@ func TestListen_WithHeartbeat(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	js, err := GetJetStream(ctx, nc)
+	js, err := New(nc)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -376,7 +378,7 @@ func TestPurgeStream(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	js, err := GetJetStream(ctx, nc)
+	js, err := New(nc)
 	defer nc.Close()
 
 	s, err := js.AddStream(ctx, nats.StreamConfig{Name: "foo", Subjects: []string{"FOO.123"}})
@@ -419,7 +421,7 @@ func TestAccountInfo(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	js, err := GetJetStream(ctx, nc)
+	js, err := New(nc)
 	defer nc.Close()
 	_, err = js.AddStream(ctx, nats.StreamConfig{Name: "foo", Subjects: []string{"FOO.123"}})
 	if err != nil {
@@ -445,7 +447,7 @@ func TestPublishStream(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	js, err := GetJetStream(ctx, nc)
+	js, err := New(nc)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -544,7 +546,7 @@ func TestJetStreamPublishAsync(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	js, err := GetJetStream(ctx, nc)
+	js, err := New(nc)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -672,4 +674,133 @@ func TestJetStreamPublishAsync(t *testing.T) {
 	// if err == nil || err.Error() != expectedErr {
 	// 	t.Errorf("Expected %v, got: %v", expectedErr, err)
 	// }
+}
+
+func BenchmarkNext(b *testing.B) {
+	srv := RunBasicJetStreamServer()
+	defer func() {
+		var sd string
+		if config := srv.JetStreamConfig(); config != nil {
+			sd = config.StoreDir
+		}
+		srv.Shutdown()
+		if sd != "" {
+			if err := os.RemoveAll(sd); err != nil {
+				b.Fatalf("Unable to remove storage %q: %v", sd, err)
+			}
+		}
+		srv.WaitForShutdown()
+	}()
+	nc, err := nats.Connect(srv.ClientURL())
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+
+	js, err := New(nc)
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+	defer nc.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s, err := js.AddStream(ctx, nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+	cons, err := s.AddConsumer(ctx, nats.ConsumerConfig{
+		Durable:   "dlc",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+	client, err := js.Client(ctx)
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+	for n := 0; n < b.N; n++ {
+		if _, err := client.Publish(ctx, "foo", []byte("test")); err != nil {
+			b.Fatalf("Unexpected error: %v", err)
+		}
+	}
+
+	start := time.Now()
+	for n := 0; n < b.N; n++ {
+		msg, err := cons.Next(ctx)
+		if err != nil {
+			b.Fatalf("Unexpected error: %v", err)
+		}
+		msg.Ack()
+	}
+	fmt.Printf("Execution time: %s\n Operations: %d\n", time.Since(start).String(), b.N)
+
+}
+
+func BenchmarkStream(b *testing.B) {
+	srv := RunBasicJetStreamServer()
+	defer func() {
+		var sd string
+		if config := srv.JetStreamConfig(); config != nil {
+			sd = config.StoreDir
+		}
+		srv.Shutdown()
+		if sd != "" {
+			if err := os.RemoveAll(sd); err != nil {
+				b.Fatalf("Unable to remove storage %q: %v", sd, err)
+			}
+		}
+		srv.WaitForShutdown()
+	}()
+	nc, err := nats.Connect(srv.ClientURL())
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+
+	js, err := New(nc)
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+	defer nc.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s, err := js.AddStream(ctx, nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+	cons, err := s.AddConsumer(ctx, nats.ConsumerConfig{
+		Durable:   "dlc",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+	client, err := js.Client(ctx)
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+	wg := sync.WaitGroup{}
+	for n := 0; n < b.N; n++ {
+		if _, err := client.Publish(ctx, "foo", []byte("test")); err != nil {
+			b.Fatalf("Unexpected error: %v", err)
+		}
+		wg.Add(1)
+	}
+
+	start := time.Now()
+	err = cons.Stream(ctx, func(msg JetStreamMsg) {
+		msg.Ack()
+		wg.Done()
+	})
+	if err != nil {
+		b.Fatalf("Unexpected error: %v", err)
+	}
+	wg.Wait()
+	fmt.Printf("Execution time: %s\n Operations: %d\n", time.Since(start).String(), b.N)
+
 }

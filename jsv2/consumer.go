@@ -23,7 +23,6 @@ import (
 	"errors"
 
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nuid"
 )
 
 type (
@@ -33,7 +32,7 @@ type (
 		// Next is used to retrieve a single message from the stream
 		Next(context.Context, ...nextOpt) (JetStreamMsg, error)
 		// Stream can be used to continously receive messages and handle them with the provided callback function
-		Stream(context.Context, MessageHandler, ...streamOpt) error
+		Stream(context.Context, MessageHandler, ...pullStreamOpt) error
 
 		// Info returns Consumer details
 		Info(context.Context) (*nats.ConsumerInfo, error)
@@ -42,17 +41,22 @@ type (
 	// nextOpt is used to configure `Next()` method with additional parameters
 	nextOpt func(*pullRequest) error
 
-	// streamFunc represents additional options used in `Stream()`
-	streamOpt func(*pullRequest) error
+	// pullStreamOpt represent additional options used in `Stream()` for pull consumers
+	pullStreamOpt func(*pullRequest) error
 
 	// MessageHandler is a handler function used as callback in `Stream()`
 	MessageHandler func(msg JetStreamMsg)
-	pullConsumer   struct {
+
+	consumer struct {
 		jetStream    *jetStream
 		stream       string
 		durable      bool
 		name         string
 		subscription *nats.Subscription
+		info         *nats.ConsumerInfo
+	}
+	pullConsumer struct {
+		consumer
 	}
 
 	pullRequest struct {
@@ -62,6 +66,17 @@ type (
 		NoWait    bool          `json:"no_wait,omitempty"`
 		Heartbeat time.Duration `json:"idle_heartbeat,omitempty"`
 	}
+
+	pushConsumer struct {
+		consumer
+	}
+
+	pushOpts struct {
+		ordered bool
+	}
+
+	// pushStreamOpt represents additional options used in `Stream()` for push consumers
+	pushStreamOpt func(*pushOpts) error
 )
 
 var (
@@ -69,33 +84,41 @@ var (
 	ErrNoMessages = errors.New("nats: no messages")
 	// ErrConsumerNotFound is returned when a consumer with given name is not found
 	ErrConsumerNotFound = errors.New("nats: consumer not found")
+	// ErrHandlerRequired is returned when no handler func is provided in Stream()
+	ErrHandlerRequired = errors.New("nats: handler cannot be empty")
 )
 
 // Next fetches an individual message from a consumer.
 // Timeout for this operation is handled using `context.Deadline()`, so it should always be set to avoid getting stuck
 //
 // Available options:
-// WithNoWait() - when set to true, `Next()` request does not wait for a message if no message is available on a channel
+// WithNoWait() - when set to true, `Next()` request does not wait for a message if no message is available at the time of request
 func (p *pullConsumer) Next(ctx context.Context, opts ...nextOpt) (JetStreamMsg, error) {
-	if _, ok := ctx.Deadline(); !ok {
+	deadline, ok := ctx.Deadline()
+	if !ok {
 		return nil, nats.ErrNoDeadlineContext
 	}
 	req := &pullRequest{
 		Batch: 1,
+	}
+	// Make expiry a little bit shorter than timeout
+	timeout := time.Until(deadline)
+	if timeout >= 20*time.Millisecond {
+		req.Expires = timeout - 10*time.Millisecond
 	}
 	for _, opt := range opts {
 		if err := opt(req); err != nil {
 			return nil, err
 		}
 	}
-	msgs, err := p.fetch(ctx, *req)
-	if err != nil {
-		return nil, err
-	}
-	if len(msgs) == 0 {
-		return nil, ErrNoMessages
-	}
-	return msgs[0], nil
+	// msgs, err := p.fetch(ctx, *req, nil)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// if len(msgs) == 0 {
+	// 	return nil, ErrNoMessages
+	// }
+	return nil, nil
 }
 
 // Stream continously receives messages from a consumer and handles them with the provided callback function
@@ -104,10 +127,13 @@ func (p *pullConsumer) Next(ctx context.Context, opts ...nextOpt) (JetStreamMsg,
 // Available options:
 // WithBatchSize() - sets a single batch request messages limit, default is set to 100
 // WithExpiry() - sets a timeout for individual batch request
-func (p *pullConsumer) Stream(ctx context.Context, handler MessageHandler, opts ...streamOpt) error {
-	defaultTimeout := 250 * time.Millisecond
+func (p *pullConsumer) Stream(ctx context.Context, handler MessageHandler, opts ...pullStreamOpt) error {
+	if handler == nil {
+		return ErrHandlerRequired
+	}
+	defaultTimeout := 1 * time.Second
 	req := &pullRequest{
-		Batch:   5,
+		Batch:   1000,
 		Expires: defaultTimeout - 10*time.Millisecond,
 	}
 	for _, opt := range opts {
@@ -125,15 +151,15 @@ func (p *pullConsumer) Stream(ctx context.Context, handler MessageHandler, opts 
 				break Listen
 			default:
 				if len(pending) < req.Batch {
-					fetchCtx, cancel := context.WithTimeout(ctx, req.Expires+10*time.Millisecond)
-					msgs, err := p.fetch(fetchCtx, *req)
+					fetchCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
+					_ = p.fetch(fetchCtx, *req, pending)
 					cancel()
-					if err != nil && !errors.Is(err, nats.ErrTimeout) {
-						fmt.Println(err)
-					}
-					for _, msg := range msgs {
-						pending <- msg
-					}
+					// if err != nil && !errors.Is(err, nats.ErrTimeout) {
+
+					// }
+					// for _, msg := range msgs {
+					// pending <- msg
+					// }
 				}
 			}
 		}
@@ -156,50 +182,48 @@ func (p *pullConsumer) Stream(ctx context.Context, handler MessageHandler, opts 
 
 // fetch sends a pull request to the server and waits for messages using a subscription from `pullConsumer`
 // messages will be fetched up to given batch_size or until there are no more messages or timeout is returned
-func (c *pullConsumer) fetch(ctx context.Context, req pullRequest) ([]*jetStreamMsg, error) {
+func (c *pullConsumer) fetch(ctx context.Context, req pullRequest, target chan<- *jetStreamMsg) error {
 	if req.Batch < 1 {
-		return nil, fmt.Errorf("%w: batch size must be at least 1", nats.ErrInvalidArg)
+		return fmt.Errorf("%w: batch size must be at least 1", nats.ErrInvalidArg)
 	}
 	// if there is no subscription for this consumer, create new inbox subject and subscribe
 	if c.subscription == nil {
-		inbox := newInbox()
+		inbox := nats.NewInbox()
 		sub, err := c.jetStream.conn.SubscribeSync(inbox)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		c.subscription = sub
 	}
 
-	msgs := make([]*jetStreamMsg, 0, req.Batch)
 	reqJSON, err := json.Marshal(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	subject := apiSubj(c.jetStream.apiPrefix, fmt.Sprintf(apiRequestNextT, c.stream, c.name))
 	if err := c.jetStream.conn.PublishRequest(subject, c.subscription.Subject, reqJSON); err != nil {
-		return nil, err
+		return err
 	}
 	var count int
-	for len(msgs) < req.Batch {
-		count++
+	for count < req.Batch {
 		msg, err := c.subscription.NextMsgWithContext(ctx)
 		if err != nil {
 			if errors.Is(err, ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
-				return msgs, nil
+				return nil
 			}
-			return nil, err
+			return err
 		}
 		if err := checkMsg(msg, req.NoWait); err != nil {
 			if errors.Is(err, ErrNoMessages) || errors.Is(err, nats.ErrTimeout) {
-				return msgs, nil
+				continue
 			}
-			return nil, err
+			return err
 		}
-		msgs = append(msgs, c.jetStream.toJSMsg(msg))
-
+		target <- c.jetStream.toJSMsg(msg)
+		count++
 	}
-	return msgs, nil
+	return nil
 }
 
 // Info returns nats.ConsumerInfo for a given consumer
@@ -217,24 +241,8 @@ func (p *pullConsumer) Info(ctx context.Context) (*nats.ConsumerInfo, error) {
 		return nil, resp.Error
 	}
 
+	p.info = resp.ConsumerInfo
 	return resp.ConsumerInfo, nil
-}
-
-const (
-	inboxPrefix    = "_INBOX."
-	inboxPrefixLen = len(inboxPrefix)
-	rdigits        = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	base           = 62
-	nuidSize       = 22
-)
-
-func newInbox() string {
-	var b [inboxPrefixLen + nuidSize]byte
-	pres := b[:inboxPrefixLen]
-	copy(pres, inboxPrefix)
-	ns := b[inboxPrefixLen:]
-	copy(ns, nuid.Next())
-	return string(b[:])
 }
 
 // toJSMsg converts core `nats.Msg` to `jetStreamMsg`, wxposing JetStream-specific operations
@@ -311,18 +319,21 @@ func upsertConsumer(ctx context.Context, js *jetStream, stream string, cfg nats.
 	}
 
 	return &pullConsumer{
-		jetStream: js,
-		stream:    stream,
-		name:      resp.Name,
-		durable:   cfg.Durable != "",
+		consumer: consumer{
+			jetStream: js,
+			stream:    stream,
+			name:      resp.Name,
+			durable:   cfg.Durable != "",
+			info:      resp.ConsumerInfo,
+		},
 	}, nil
 }
 
-func getConsumer(ctx context.Context, js *jetStream, stream, consumer string) (Consumer, error) {
-	if err := validateDurableName(consumer); err != nil {
+func getConsumer(ctx context.Context, js *jetStream, stream, name string) (Consumer, error) {
+	if err := validateDurableName(name); err != nil {
 		return nil, err
 	}
-	infoSubject := apiSubj(js.apiPrefix, fmt.Sprintf(apiConsumerInfoT, stream, consumer))
+	infoSubject := apiSubj(js.apiPrefix, fmt.Sprintf(apiConsumerInfoT, stream, name))
 
 	var resp consumerInfoResponse
 
@@ -337,10 +348,12 @@ func getConsumer(ctx context.Context, js *jetStream, stream, consumer string) (C
 	}
 
 	return &pullConsumer{
-		jetStream: js,
-		stream:    stream,
-		name:      consumer,
-		durable:   resp.Config.Durable != "",
+		consumer: consumer{
+			jetStream: js,
+			stream:    stream,
+			name:      name,
+			durable:   resp.Config.Durable != "",
+		},
 	}, nil
 }
 
@@ -361,5 +374,57 @@ func deleteConsumer(ctx context.Context, js *jetStream, stream, consumer string)
 		}
 		return resp.Error
 	}
+	return nil
+}
+
+// TODO: finish work on push consumer
+func (c *pushConsumer) Stream(ctx context.Context, handler MessageHandler, opts ...pushStreamOpt) error {
+	if handler == nil {
+		return ErrHandlerRequired
+	}
+	var pushOpts pushOpts
+	for _, opt := range opts {
+		if err := opt(&pushOpts); err != nil {
+			return err
+		}
+	}
+	consumerConfig := c.info.Config
+	// if pushOpts.ordered {
+	// 	if c.durable {
+	// 		return fmt.Errorf("nsts: durable can not be set for an ordered consumer")
+	// 	}
+
+	// 	if consumerConfig.MaxDeliver <= 1 {
+	// 		return fmt.Errorf("nats: max deliver can not be set for an ordered consumer")
+	// 	}
+
+	// 	if consumerConfig.DeliverSubject != "" {
+
+	// 	}
+	// }
+
+	if consumerConfig.DeliverSubject == "" {
+		return fmt.Errorf("deliver subject cannot be empty for push-based consumers")
+	}
+	if consumerConfig.DeliverGroup == "" && c.info.PushBound {
+		return fmt.Errorf("consumer is already bound to a subscription")
+	}
+
+	msgsChan := make(chan *nats.Msg)
+	_, err := c.jetStream.conn.ChanSubscribe(consumerConfig.DeliverSubject, msgsChan)
+	if err != nil {
+		return err
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				{
+					// do something
+				}
+			}
+		}
+	}()
+	// _, err := c.jetStream.conn.Subscribe(consumerConfig.DeliverSubject, handler)
 	return nil
 }

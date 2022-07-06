@@ -110,22 +110,68 @@ var (
 	ErrInvalidStreamName      = errors.New("nats: invalid stream name")
 )
 
-func GetJetStream(ctx context.Context, nc *nats.Conn, opts ...jetStreamOpt) (JetStream, error) {
+// New returns a enw JetStream instance
+//
+// Available options:
+// WithClientTrace() - enables request/response tracing
+func New(nc *nats.Conn, opts ...jetStreamOpt) (JetStream, error) {
+	jsOpts := jsOpts{apiPrefix: defaultAPIPrefix}
+	for _, opt := range opts {
+		if err := opt(&jsOpts); err != nil {
+			return nil, err
+		}
+	}
+	js := &jetStream{
+		conn:   nc,
+		jsOpts: jsOpts,
+	}
+
+	return js, nil
+}
+
+// NewWithAPIPrefix returns a new JetStream instance and sets the API prefix to be used in requests to JetStream API
+//
+// Available options:
+// WithClientTrace() - enables request/response tracing
+func NewWithAPIPrefix(nc *nats.Conn, apiPrefix string, opts ...jetStreamOpt) (JetStream, error) {
 	var jsOpts jsOpts
 	for _, opt := range opts {
 		if err := opt(&jsOpts); err != nil {
 			return nil, err
 		}
 	}
-	if jsOpts.apiPrefix == "" {
-		jsOpts.apiPrefix = defaultAPIPrefix
+	if apiPrefix == "" {
+		return nil, fmt.Errorf("API prefix cannot be empty")
 	}
-
+	if !strings.HasSuffix(apiPrefix, ".") {
+		jsOpts.apiPrefix = fmt.Sprintf("%s.", apiPrefix)
+	}
 	js := &jetStream{
 		conn:   nc,
 		jsOpts: jsOpts,
 	}
+	return js, nil
+}
 
+// NewWithDomain returns a new JetStream instance and sets the domain name token used when sending JetStream requests
+//
+// Available options:
+// WithClientTrace() - enables request/response tracing
+func NewWithDomain(nc *nats.Conn, domain string, opts ...jetStreamOpt) (JetStream, error) {
+	var jsOpts jsOpts
+	for _, opt := range opts {
+		if err := opt(&jsOpts); err != nil {
+			return nil, err
+		}
+	}
+	if domain == "" {
+		return nil, fmt.Errorf("domain cannot be empty")
+	}
+	jsOpts.apiPrefix = fmt.Sprintf(jsDomainT, domain)
+	js := &jetStream{
+		conn:   nc,
+		jsOpts: jsOpts,
+	}
 	return js, nil
 }
 
