@@ -190,27 +190,28 @@ func TestStream(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 25; i++ {
 		if err := nc.Publish("FOO.123", []byte(fmt.Sprintf("msg %d", i))); err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 	}
 
-	time.Sleep(2 * time.Second)
+	// time.Sleep(2 * time.Second)
 
 	err = cons.Stream(ctx, func(msg JetStreamMsg) {
-		fmt.Println(string(msg.Data()))
+		fmt.Println("received " + string(msg.Data()))
 	})
-	for i := 0; i < 30; i++ {
-		if err := nc.Publish("FOO.123", []byte(fmt.Sprintf("msg %d", i))); err != nil {
-			t.Fatalf("Unexpected error: %v", err)
-		}
-	}
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	// time.Sleep(2 * time.Second)
+	// for i := 0; i < 30; i++ {
+	// 	if err := nc.Publish("FOO.123", []byte(fmt.Sprintf("msg %d", i))); err != nil {
+	// 		t.Fatalf("Unexpected error: %v", err)
+	// 	}
+	// }
+	// if err != nil {
+	// 	t.Fatalf("Unexpected error: %v", err)
+	// }
 
-	time.Sleep(10 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	// for i := 0; i < 10; i++ {
 	// 	if err := nc.Publish("FOO.123", []byte(fmt.Sprintf("second batch msg %d", i))); err != nil {
@@ -739,7 +740,7 @@ func BenchmarkNext(b *testing.B) {
 
 }
 
-func BenchmarkStream(b *testing.B) {
+func TestStreamBench(b *testing.T) {
 	srv := RunBasicJetStreamServer()
 	defer func() {
 		var sd string
@@ -785,7 +786,7 @@ func BenchmarkStream(b *testing.B) {
 		b.Fatalf("Unexpected error: %v", err)
 	}
 	wg := sync.WaitGroup{}
-	for n := 0; n < b.N; n++ {
+	for n := 0; n < 500000; n++ {
 		if _, err := client.Publish(ctx, "foo", []byte("test")); err != nil {
 			b.Fatalf("Unexpected error: %v", err)
 		}
@@ -794,6 +795,7 @@ func BenchmarkStream(b *testing.B) {
 
 	start := time.Now()
 	err = cons.Stream(ctx, func(msg JetStreamMsg) {
+		// fmt.Println(string(msg.Data()))
 		msg.Ack()
 		wg.Done()
 	})
@@ -801,6 +803,6 @@ func BenchmarkStream(b *testing.B) {
 		b.Fatalf("Unexpected error: %v", err)
 	}
 	wg.Wait()
-	fmt.Printf("Execution time: %s\n Operations: %d\n", time.Since(start).String(), b.N)
+	fmt.Printf("Execution time: %s\n", time.Since(start).String())
 
 }
